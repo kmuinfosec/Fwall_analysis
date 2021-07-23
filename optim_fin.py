@@ -8,6 +8,7 @@ import datetime
 import re
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 BASE_PATH= 'Wins_FIREWALL/results' #결과물 경로
 
@@ -19,16 +20,20 @@ def memory_usage(message: str = 'debug'):  #메모리 사용량
 
 
 class topk_delta():
-    def __init__(self,path,w,k,d,ugr=False) -> None:
+    def __init__(self,path,w,k,d,ugr=False) :
         self.ugr = ugr
-        if self.ugr: #UGR데이터 셋 사용할때 사용하는 컬럼
+        if self.ugr: #UGR데이터 셋 사용할때 사용하는 컬럼 윈스에선 사용 안함
             self.columns = ['Rdate','duration','src_ip','dst_ip','src_port','dst_port','proto','flag','forwarding status','ToS','packets','bytes','label']
         else: #윈스 컬럼
             self.columns = ['Rdate','sender_type','Ip','group_id','device_type','ckc','sensor_id','Stime','Etime','src_ip','dst_ip','Proto','src_port','dst_port','Action','signiture','highlight','priority','Cnt','src_country','dst_country','device_id','Node','category','minor','Flag','msg','pool_id','pool_group_id','cve_code','data_type','is_profile','Profile_log_id_list','Profile_id','Profile_name','Ai_flag','Opt0','Opt1','Opt2','Opt3','Opt4','Opt5','Opt6','Opt7','Opt8','Opt9','Opt10','Opt11']
         
         self.paths = glob(path,recursive=True) #방화벽 데이터셋 경로
 
-        self.arg_ds = [ # 만들 테이블의 key들 hh: heavy hitter, hdh: heavy distinct hitter
+        self.keys = [ # 만들 테이블의 key들 hh: heavy hitter, hdh: heavy distinct hitter
+
+                        # hh에서 || -> concat     ex)src_ip||dst_port -> 192.168.0.1||8.8.8.8 이 키값이 되어서 카운트함
+
+                        # hdh에서 ex) dst_ip||src_country -> dst_ip:{src_country} 앞의 키를 키값으로 주고 뒤의 키의 카디널리티를 값으로 줌
 
             'hh: dst_port',
             'hh: src_ip||dst_port',
@@ -43,25 +48,30 @@ class topk_delta():
             'hdh: dst_ip||src_ip'
 
             ]
+
+
         self.d=d #테이블의 기간 
+
         self.table=[]
+
         self.k = k #top-k의 k
+
         self.w = w # 테이블을 합칠 기간(훈련기간)
 
-        self.fromiso  = datetime.datetime.fromisoformat
+        self.fromiso  = datetime.datetime.fromisoformat # 데이트타임 형식으로 바꿔주는 함수
 
-    def create_table(self):  #빈 테이블 작성(d)
-        arg_d = dict()
-        for i in self.arg_ds:
+    def create_table(self):  #분석한 키들을 파싱해서 빈 테이블 작성(d)
+        tables = dict()
+        for i in self.keys:
             if 'hh' in i:
                 ccounter = collections.Counter()
-                arg_d[i] = ccounter
+                tables[i] = ccounter
             else:
                 a= dict()
-                arg_d[i]= a
-        return arg_d
+                tables[i]= a
+        return tables
 
-    def fname2time(self, path): #파일 이름을 isoformat 시간으로
+    def fname2time(self, path): #파일 이름을 파싱해서 isoformat 시간으로
         tmp = path.split('\\')[-1].split('.')[0].split('-')[:2]
         y=tmp[0][:4]
         m=tmp[0][4:6]
@@ -69,7 +79,7 @@ class topk_delta():
         h=tmp[1]
         return f"{y}-{m}-{d} {h}:00:00"
     
-    def path_window(self): #파일경로를 시간대별로 정리
+    def path_window(self): #파일경로를 시간대별로 정리 key:value = 시간:경로
         self.w_path= dict()
         for p in self.paths:
             a= self.fromiso(self.fname2time(p))
@@ -99,47 +109,49 @@ class topk_delta():
 
 
     def count_topk(self,data): # 파일을 읽어서 전체 카운트
-        arg_d = self.create_table()
+        tables = self.create_table()
         for i in tqdm(data):
             with open(i,'r',encoding='utf-8') as f:
-                while True:
-                    lines = f.readlines(10000)
-                    if not lines:
+                while True: 
+                    lines = f.readlines(10000) # 10000줄만 읽기
+                    if not lines: #파일 전체 읽으면 반복문 탈출
                         break
                     else:
                         for l in lines:
-                            tmp = dict(zip(self.columns,l.split('\t')))
-                            for key in arg_d:
+                            tmp = dict(zip(self.columns,l.split('\t'))) #wins 로그가 tsv형식이여서 탭으로 끊고 컬럼이름으로 임시 딕셔너리 만듬
+                            for key in tables: #빈테이블의 키 파싱
                                 keys = key.split(' ')
-                                if 'hh' in keys[0]:
+                                if 'hh' in keys[0]: # heavy hitter의 경우 counter 함수를 이용해서 카운팅
                                     keys = keys[1]
                                     if '||' in keys:
                                         keys = keys.split('||')
                                         val = '||'.join([tmp[i] for i in keys])
-                                        arg_d[key].update({val})
+                                        tables[key].update({val})
                                     else:   
-                                        arg_d[key].update({tmp[keys]})
-                                else:
+                                        tables[key].update({tmp[keys]})
+                                else: # heavy distinct hitter 의 경우 딕셔너리에 set을 이용해서 카디널리티 카운트
                                     keys = keys[1].split('||')
 
-                                    if tmp[keys[0]] not in arg_d[key]:
+                                    if tmp[keys[0]] not in tables[key]:
                                         a={tmp[keys[1]]}
-                                        arg_d[key][tmp[keys[0]]] = a
+                                        tables[key][tmp[keys[0]]] = a
                                     else:
-                                        arg_d[key][tmp[keys[0]]].update({tmp[keys[1]]})
-        return arg_d
+                                        tables[key][tmp[keys[0]]].update({tmp[keys[1]]})
+        return tables
 
 
     def k_extract(self): # top-k의 key값만 가져옴 
         self.wls = []
 
-        for tables in self.t:
-            wl = self.mk_day_set()
+        for tables in self.t: # 전체테이블 반복
+            wl = self.mk_day_set() # white list를 담을 빈 셋트
+
             for idx,key in enumerate(tables):
-                if type(tables[key])!=type({}):
-                    for i in (map(lambda x :x[0] ,tables[key].most_common(self.k))):
+                if type(tables[key])!=type({}): # heavy hitter
+                    for i in (map(lambda x :x[0] ,tables[key].most_common(self.k))): # top-k의 key값만 가져옴 
                         wl[idx].add(i)
-                else:
+
+                else: # heavy distinct hitter
                     tmp = collections.Counter(dict(list(map(lambda x:(x[0], len(x[1])), tables[key].items()))))
                     for i in (map(lambda x :x[0] ,tmp.most_common(self.k))):
                         wl[idx].add(i)
@@ -147,7 +159,7 @@ class topk_delta():
 
     def mk_day_set(self): # 빈 셋트 만듬
         wls=[]
-        for i in range(len(self.arg_ds)):
+        for i in range(len(self.keys)):
             wls.append(set())
         return wls
 
@@ -155,11 +167,11 @@ class topk_delta():
         self.k_extract()
         self.diff_output= []
         i=1
-        for s_day in range(self.d):
+        for s_day in range(self.d): # bootstrap 기간이 되기 전까지 
             l = self.table_diff(0,s_day)
             self.diff_output.append(l)
             
-        for s_day in range(0,len(self.wls)-self.d):
+        for s_day in range(0,len(self.wls)-self.d): # bootstrap 이후
             l = self.table_diff(s_day,self.d)
             self.diff_output.append(l)
 
@@ -177,30 +189,40 @@ class topk_delta():
         return l
 
     def run(self): # 실행
-        l = self.window()
+        l = self.window() # 윈도우 시간별로 경로 묶기
+
         reg = re.compile('[\/:*?\"<>|]')
+        
         self.t = []
-        cache_path=f'{BASE_PATH}/cache/'
+        
+        cache_path=f'{BASE_PATH}/cache/' # 캐시 경로
+
         if not os.path.exists(cache_path):
             os.mkdir(cache_path)
         for p in l:
-            start= self.fname2time(p[0])
-            end = self.fname2time(p[-1])
-            fname = f'{start}-{end}'
-            fname = reg.sub('',fname)
-            if not os.path.exists(f'{cache_path+fname}.pkl'): #날짜별로 캐시 저장
+            start= self.fname2time(p[0]) #window내의 첫 파일 이름 파싱
+            end = self.fname2time(p[-1]) #window내의 마지막 파일 이름 파싱
+
+            fname = f'{start}-{end}' # 캐시 파일이름 
+            fname = reg.sub('',fname) # 특수문자 제거
+
+            if not os.path.exists(f'{cache_path+fname}.pkl'): #캐시가 없으면 날짜별로 캐시 저장
                 tables = self.count_topk(p)
+
                 with open(f'{cache_path+fname}.pkl','wb') as f:
                     pickle.dump(tables,f)
-            else:
+            else: # 캐시 존재시 캐시 불러오기
                 with open(f'{cache_path+fname}.pkl','rb') as f:
                     tables = pickle.load(f)   
             self.t.append(tables)
+
         self.set_diff()
 
-    def transpose(self,diff):
+        self.t_table = self.transpose(self.diff_output)
+
+    def transpose(self,diff): # [1일(hh: src_ip, hdh:src_ip, ... ),2일(...), ...] - >[hh:src_ip(1일,2일,3일....), hdh:src_ip(1일,2일,3일...),....]
         ls=[]
-        key_len = len(self.arg_ds)
+        key_len = len(self.keys)
         for day,d in enumerate(diff):
             for idx,c in enumerate(d):
                 if day==0:
@@ -210,11 +232,10 @@ class topk_delta():
         return ls
 
     def graph(self,path)->None: #결과 그래프로 이미지 저장
-        l = self.transpose(self.diff_output)
         if not os.path.exists(path):
             os.mkdir(path)
         reg = re.compile('[\/:*?\"<>|]')
-        for i,t in zip(l,self.arg_ds):
+        for i,t in zip(self.t_table,self.keys):
             plt.figure(figsize=(12,6))
             plt.ylim(top=self.k)
             plt.yticks(fontsize=20)
@@ -224,18 +245,14 @@ class topk_delta():
             t = reg.sub(' ',t)
             plt.savefig(f'{path}/{t}.png')
 
-    def raw(self,day,col)->list: #원하는 날의 컬럼 key:value 리스트로 반환
+    def raw(self,day=0,col=0, all = False): #원하는 날의 컬럼 key:value 리스트로 반환
 
-        for idx,c in enumerate(self.arg_ds):
+        for idx,c in enumerate(self.keys):
             if c == col:
                 col_idx = idx
         
         return [(i,self.t[day][col][i]) for i in self.diff_output[day][col_idx]]
-        
-        # if col == 'all':
-        #     return self.t[day]
-        # # return self.t[day][col]
-
+    
 
 
 
