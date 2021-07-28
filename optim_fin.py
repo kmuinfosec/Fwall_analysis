@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-BASE_PATH= 'Wins_FIREWALL/results' #결과물 경로
 
 def memory_usage(message: str = 'debug'):  #메모리 사용량
     # current process RAM usage
@@ -20,14 +19,21 @@ def memory_usage(message: str = 'debug'):  #메모리 사용량
 
 
 class topk_delta():
-    def __init__(self,path,w,k,d,ugr=False) :
+    def __init__(self,data_path,res_path,w,k,d,ugr=False,use_cache=False,recursive = False) :
+        if (res_path[-1]=='/') or (res_path[-1]=='\\'):
+            self.res_path = res_path[:-1]
+        else:
+            self.res_path= res_path #결과물 경로
+        self.use_cache = use_cache
+        if not os.path.exists(res_path):
+            os.mkdir(self.res_path)
         self.ugr = ugr
         if self.ugr: #UGR데이터 셋 사용할때 사용하는 컬럼 윈스에선 사용 안함
             self.columns = ['Rdate','duration','src_ip','dst_ip','src_port','dst_port','proto','flag','forwarding status','ToS','packets','bytes','label']
         else: #윈스 컬럼
             self.columns = ['Rdate','sender_type','Ip','group_id','device_type','ckc','sensor_id','Stime','Etime','src_ip','dst_ip','Proto','src_port','dst_port','Action','signiture','highlight','priority','Cnt','src_country','dst_country','device_id','Node','category','minor','Flag','msg','pool_id','pool_group_id','cve_code','data_type','is_profile','Profile_log_id_list','Profile_id','Profile_name','Ai_flag','Opt0','Opt1','Opt2','Opt3','Opt4','Opt5','Opt6','Opt7','Opt8','Opt9','Opt10','Opt11']
         
-        self.paths = glob(path,recursive=True) #방화벽 데이터셋 경로
+        self.paths = glob(data_path,recursive=recursive) #방화벽 데이터셋 경로
 
         self.keys = [ # 만들 테이블의 key들 hh: heavy hitter, hdh: heavy distinct hitter
 
@@ -42,10 +48,10 @@ class topk_delta():
             'hh: dst_ip',
             'hh: src_ip',
             'hh: src_ip||dst_ip',
-            'hdh: dst_ip||src_country',
+            'hdh: src_ip||dst_country',
             'hdh: src_ip||dst_port',
             'hdh: src_ip||dst_ip',
-            'hdh: dst_ip||src_ip'
+            'hh: src_port||dst_port'
 
             ]
 
@@ -183,38 +189,50 @@ class topk_delta():
             for i in range(len(d_set)):
                 da =self.wls[day][i]
                 d_set[i] = set.union(d_set[i],da)
-
+        # print(self.wls)
+        # quit()
         for before,now in zip(d_set,self.wls[s_day+d]):
             l.append(now.difference(before))
         return l
 
     def run(self): # 실행
-        l = self.window() # 윈도우 시간별로 경로 묶기
+        self.l = self.window() # 윈도우 시간별로 경로 묶기
 
         reg = re.compile('[\/:*?\"<>|]')
         
         self.t = []
         
-        cache_path=f'{BASE_PATH}/cache/' # 캐시 경로
+        cache_path=f'{self.res_path}/cache/' # 캐시 경로
 
-        if not os.path.exists(cache_path):
-            os.mkdir(cache_path)
-        for p in l:
-            start= self.fname2time(p[0]) #window내의 첫 파일 이름 파싱
-            end = self.fname2time(p[-1]) #window내의 마지막 파일 이름 파싱
+        if not self.use_cache:
+            for p in self.l:
+                start= self.fname2time(p[0]) #window내의 첫 파일 이름 파싱
+                end = self.fname2time(p[-1]) #window내의 마지막 파일 이름 파싱
 
-            fname = f'{start}-{end}' # 캐시 파일이름 
-            fname = reg.sub('',fname) # 특수문자 제거
-
-            if not os.path.exists(f'{cache_path+fname}.pkl'): #캐시가 없으면 날짜별로 캐시 저장
+                fname = f'{start}-{end}' # 캐시 파일이름 
+                fname = reg.sub('',fname) # 특수문자 제거
                 tables = self.count_topk(p)
+                self.t.append(tables)
+        
+        else:
+            if not os.path.exists(cache_path):
+                os.mkdir(cache_path)
+            for p in self.l:
+                start= self.fname2time(p[0]) #window내의 첫 파일 이름 파싱
+                end = self.fname2time(p[-1]) #window내의 마지막 파일 이름 파싱
 
-                with open(f'{cache_path+fname}.pkl','wb') as f:
-                    pickle.dump(tables,f)
-            else: # 캐시 존재시 캐시 불러오기
-                with open(f'{cache_path+fname}.pkl','rb') as f:
-                    tables = pickle.load(f)   
-            self.t.append(tables)
+                fname = f'{start}-{end}' # 캐시 파일이름 
+                fname = reg.sub('',fname) # 특수문자 제거
+
+                if not os.path.exists(f'{cache_path+fname}.pkl'): #캐시가 없으면 날짜별로 캐시 저장
+                    tables = self.count_topk(p)
+
+                    with open(f'{cache_path+fname}.pkl','wb') as f:
+                        pickle.dump(tables,f)
+                else: # 캐시 존재시 캐시 불러오기
+                    with open(f'{cache_path+fname}.pkl','rb') as f:
+                        tables = pickle.load(f)   
+                self.t.append(tables)
 
         self.set_diff()
 
@@ -232,6 +250,7 @@ class topk_delta():
         return ls
 
     def graph(self,path)->None: #결과 그래프로 이미지 저장
+        path = f'{self.res_path}'
         if not os.path.exists(path):
             os.mkdir(path)
         reg = re.compile('[\/:*?\"<>|]')
@@ -245,21 +264,90 @@ class topk_delta():
             t = reg.sub(' ',t)
             plt.savefig(f'{path}/{t}.png')
 
-    def raw(self,day=0,col=0, all = False): #원하는 날의 컬럼 key:value 리스트로 반환
+    def raw(self,day=0,col=0): #원하는 날의 컬럼 key:value 리스트로 반환
 
         for idx,c in enumerate(self.keys):
             if c == col:
                 col_idx = idx
-        
-        return [(i,self.t[day][col][i]) for i in self.diff_output[day][col_idx]]
-    
+        if 'hdh' in col:
+            raw = [(i,len(self.t[day][col][i])) for i in self.diff_output[day][col_idx]]
+        else:
+            raw = [(i,self.t[day][col][i]) for i in self.diff_output[day][col_idx]]
+        raw = sorted(raw,key = lambda x: x[1],reverse=True)
 
+        return [(f"{i[0]}: {i[1]}") for i in raw]
+    
+    # def to_csv(self,show_value=False): # 결과 csv로 저장
+    #     l = self.transpose(self.diff_output)
+    #     reg = re.compile('[\/:*?\"<>|]')
+
+    #     s = self.fname2time(self.l[0][0])
+    #     e = self.fname2time(self.l[-1][-1])
+    #     if show_value:
+    #         with open(f'{self.res_path}/report_{reg.sub(" " ,"__".join((s,e)))}.csv', 'w', encoding='utf-8') as f:
+    #             f.write('day,subject,count,keys:values\n')
+
+    #             for s_idx, sub in enumerate(l):
+    #                 subject = self.keys[s_idx]
+    #                 if 'hdh' in subject:
+    #                     for day, i in enumerate(sub):
+    #                         f.write(f"{day+1},{subject},{len(i)},{'   '.join(self.raw(day,subject))}")
+    #                         f.write('\n')
+    #                 else:
+    #                     for day, i in enumerate(sub):
+    #                         raw = self.raw(day,subject)
+    #                         raw = sorted(raw,key=lambda x: x[1])
+    #                         f.write(f"{day+1},{subject},{len(i)},{'   '.join(self.raw(day,subject))}")
+    #                         f.write('\n')
+            
+        # else:
+        #     with open(f'{self.res_path}/report_{reg.sub(" " ,"__".join((s,e)))}.csv', 'w', encoding='utf-8') as f:
+        #         f.write('day, subject, count, keys:values\n')
+        #         for s_idx, sub in enumerate(l):
+        #             subject = self.keys[s_idx]
+        #             for day, i in enumerate(sub):
+        #                 f.write(f"{day+1},{subject},{len(i)},{'    '.join(i)}")
+        #                 f.write('\n')
+    
+    def to_csv(self,show_value=False): # 결과 csv로 저장
+        l = self.diff_output
+        reg = re.compile('[\/:*?\"<>|]')
+
+        s = self.fname2time(self.l[0][0])
+        e = self.fname2time(self.l[-1][-1])
+        if show_value:
+            with open(f'{self.res_path}/report_{reg.sub(" " ,"__".join((s,e)))}.csv', 'w', encoding='utf-8') as f:
+                f.write('day,subject,count,keys:values\n')
+
+                for day, d in enumerate(l):
+                    for sub, i in enumerate(d):
+                        subject = self.keys[sub]
+                        if 'hdh' in subject:
+                            f.write(f"{day+1},{subject},{len(i)},{'   '.join(self.raw(day,subject))}")
+                            f.write('\n')   
+                        else:
+                            f.write(f"{day+1},{subject},{len(i)},{'   '.join(self.raw(day,subject))}")
+                            f.write('\n')
+                    f.write('\n')
+
+            
+        else:
+            with open(f'{self.res_path}/report_{reg.sub(" " ,"__".join((s,e)))}.csv', 'w', encoding='utf-8') as f:
+                f.write('day, subject, count, keys:values\n')
+                for s_idx, sub in enumerate(l):
+                    subject = self.keys[s_idx]
+                    for day, i in enumerate(sub):
+                        f.write(f"{day+1},{subject},{len(i)},{'    '.join(i)}")
+                        f.write('\n')
 
 
 if __name__ == '__main__':
     memory_usage()
-    a = topk_delta(r'Wins_FIREWALL\data\202106\FWall',24,30,7)
+    parameter = {'w':24,'k':30,'d':7}
+
+    a = topk_delta(data_path = r'data\202106\FWall\*\*',recursive=True,res_path='./results',use_cache=True,**parameter)
+
     a.run()
-    a.graph('Wins_FIREWALL/results/graph')
-    print(a.raw(0,'hh: src_ip'))
+    a.to_csv(show_value=True)
+    a.graph('./graph')
     memory_usage()
